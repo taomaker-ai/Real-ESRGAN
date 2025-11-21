@@ -8,6 +8,8 @@ from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from basicsr.utils.download_util import load_file_from_url
 from loguru import logger
 
+from realesrgan import RealESRGANer  # adjust import based on your setup
+
 # Try to use the modern torch.export-based ONNX exporter when available.
 try:  # PyTorch >= 2.3
     from torch.export import Dim
@@ -51,6 +53,73 @@ def load_model(args):
 def convert_onnx(args):
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{args.model_name}.onnx")
+
+    model_net, model_path = load_model(args)
+    logger.info(f"Model loaded from {model_path}")
+
+    # use dni to control the denoise strength
+    dni_weight = None
+    if args.model_name == 'realesr-general-x4v3' and args.denoise_strength != 1:
+        wdn_model_path = model_path.replace('realesr-general-x4v3', 'realesr-general-wdn-x4v3')
+        model_path = [model_path, wdn_model_path]
+        dni_weight = [args.denoise_strength, 1 - args.denoise_strength]
+
+    # -----------------------------
+    # 1. Load your model
+    # -----------------------------
+    device = "cuda"  # or "cpu"
+    model = RealESRGANer(
+        scale=4,          # adjust to your model
+        model_path=model_path,
+        dni_weight=dni_weight,
+        device=device,
+        model=model_net,
+    ).model
+
+    model.eval()  # set to evaluation mode
+
+    # -----------------------------
+    # 2. Prepare a dummy input
+    # -----------------------------
+    dummy_input = torch.randn(1, 3, 256, 256, device=device)  # 1x3xHxW
+
+    # -----------------------------
+    # 3. Define input/output names
+    # -----------------------------
+    input_names = ["in0"]
+    output_names = ["out0"]
+
+    # -----------------------------
+    # 4. Dynamic axes (height and width)
+    # -----------------------------
+    dynamic_axes = {
+        "in0": {2: "height", 3: "width"},
+        "out0": {2: "height", 3: "width"}
+    }
+
+    # -----------------------------
+    # 5. Export to ONNX
+    # -----------------------------
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        export_params=True,
+        opset_version=11,        # compatible with Video2X / NCNN
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        do_constant_folding=True,
+        training=torch.onnx.TrainingMode.EVAL,  # ensure eval mode
+        verbose=True
+    )
+
+    print(f"ONNX model exported successfully to {output_path}")
+
+def __convert_onnx(args):
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
     model, model_path = load_model(args)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -86,44 +155,46 @@ def convert_onnx(args):
         logger.info(f"Torchscript model exported to {output_path}")
     else:
         output_path = os.path.join(output_dir, f"{args.model_name}.onnx")
-        if _HAS_TORCH_EXPORT:
-            # Use the new torch.export-based ONNX exporter (dynamo=True) with dynamic_shapes.
-            # We keep batch/channel static and allow dynamic height/width.
-            # Specify dynamic shapes as a list/tuple matching `inputs` so we don't
-            # depend on the underlying argument name (often "x" in the model).
-            # Batch and channels are static; height/width are dynamic.
-            dynamic_shapes = [
-                (1, 3, Dim("height"), Dim("width")),
-            ]
-            torch.onnx.export(
-                model,
-                dummy_input,
-                output_path,
-                export_params=True,
-                opset_version=18,
-                input_names=["input"],
-                output_names=["output"],
-                dynamic_shapes=dynamic_shapes,
-                dynamo=True,
-            )
-            logger.info(f"ONNX model exported with dynamo=True to {output_path}")
-        else:
-            # Fallback for older PyTorch: use the legacy TorchScript-based exporter.
-            torch.onnx.export(
-                model,
-                dummy_input,
-                output_path,
-                export_params=True,
-                opset_version=18,
-                input_names=["input"],
-                output_names=["output"],
-                dynamic_axes={
-                    "input": {2: "height", 3: "width"},
-                    "output": {2: "height", 3: "width"},
-                },
-                dynamo=False,
-            )
-            logger.info(f"ONNX model exported with legacy exporter to {output_path}")
+        # if _HAS_TORCH_EXPORT:
+        #     # Use the new torch.export-based ONNX exporter (dynamo=True) with dynamic_shapes.
+        #     # We keep batch/channel static and allow dynamic height/width.
+        #     # Specify dynamic shapes as a list/tuple matching `inputs` so we don't
+        #     # depend on the underlying argument name (often "x" in the model).
+        #     # Batch and channels are static; height/width are dynamic.
+        #     logger.info("Using new torch.export-based ONNX exporter")
+        #     dynamic_shapes = [
+        #         (1, 3, Dim("height"), Dim("width")),
+        #     ]
+        #     torch.onnx.export(
+        #         model,
+        #         dummy_input,
+        #         output_path,
+        #         export_params=True,
+        #         opset_version=18,
+        #         input_names=["in0"],
+        #         output_names=["out0"],
+        #         dynamic_shapes=dynamic_shapes,
+        #         dynamo=True,
+        #     )
+        #     logger.info(f"ONNX model exported with dynamo=True to {output_path}")
+        # else:
+        # Fallback for older PyTorch: use the legacy TorchScript-based exporter.
+        logger.info("Using legacy TorchScript-based ONNX exporter")
+        torch.onnx.export(
+            model,
+            dummy_input,
+            output_path,
+            export_params=True,
+            opset_version=11,
+            input_names=["in0"],
+            output_names=["out0"],
+            dynamic_axes={
+                "in0": {2: "height", 3: "width"},
+                "out0": {2: "height", 3: "width"},
+            },
+            dynamo=False,
+        )
+        logger.info(f"ONNX model exported with legacy exporter to {output_path}")
 
 def dni(net_a, net_b, dni_weight, key='params', loc='cpu'):
     """Deep network interpolation.
