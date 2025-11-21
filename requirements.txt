@@ -11,3 +11,4 @@ loguru
 onnxscript
 pnnx
 ncnn
+onnxsim==0.4.36

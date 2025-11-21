@@ -87,16 +87,18 @@ def convert_onnx(args):
     # -----------------------------
     # 3. Define input/output names
     # -----------------------------
-    input_names = ["in0"]
-    output_names = ["out0"]
 
     # -----------------------------
     # 4. Dynamic axes (height and width)
     # -----------------------------
-    dynamic_axes = {
-        "in0": {2: "height", 3: "width"},
-        "out0": {2: "height", 3: "width"}
-    }
+    # dynamic_axes = {
+    #     "input": {2: "height", 3: "width"},
+    #     "output": {2: "height", 3: "width"}
+    # }
+
+    dynamic_shapes = [(1, 3, Dim("height"), Dim("width"))]
+    input_names = ["input"]
+    output_names = ["output"]
 
     # -----------------------------
     # 5. Export to ONNX
@@ -106,18 +108,20 @@ def convert_onnx(args):
         dummy_input,
         output_path,
         export_params=True,
-        opset_version=11,        # compatible with Video2X / NCNN
+        opset_version=18,        # compatible with Video2X / NCNN
+        dynamic_shapes=dynamic_shapes,
         input_names=input_names,
         output_names=output_names,
-        dynamic_axes=dynamic_axes,
+        # dynamic_axes=dynamic_axes,
         do_constant_folding=True,
         training=torch.onnx.TrainingMode.EVAL,  # ensure eval mode
-        verbose=True
+        dynamo=True,
+        verbose=True,
     )
 
     print(f"ONNX model exported successfully to {output_path}")
 
-def __convert_onnx(args):
+def convert_ts(args):
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
     model, model_path = load_model(args)
@@ -148,53 +152,10 @@ def __convert_onnx(args):
     dummy_input = torch.randn(1, 3, 64, 64)
     # Use a modern ONNX opset to avoid failing version conversions (e.g. Resize -> older opsets).
     # Torch recommends opset_version >= 18 for the current exporter.
-    if args.convert_to_ts:
-        ts_model = torch.jit.trace(model, dummy_input)
-        output_path = os.path.join(output_dir, f"{args.model_name}.pt")
-        ts_model.save(output_path)
-        logger.info(f"Torchscript model exported to {output_path}")
-    else:
-        output_path = os.path.join(output_dir, f"{args.model_name}.onnx")
-        # if _HAS_TORCH_EXPORT:
-        #     # Use the new torch.export-based ONNX exporter (dynamo=True) with dynamic_shapes.
-        #     # We keep batch/channel static and allow dynamic height/width.
-        #     # Specify dynamic shapes as a list/tuple matching `inputs` so we don't
-        #     # depend on the underlying argument name (often "x" in the model).
-        #     # Batch and channels are static; height/width are dynamic.
-        #     logger.info("Using new torch.export-based ONNX exporter")
-        #     dynamic_shapes = [
-        #         (1, 3, Dim("height"), Dim("width")),
-        #     ]
-        #     torch.onnx.export(
-        #         model,
-        #         dummy_input,
-        #         output_path,
-        #         export_params=True,
-        #         opset_version=18,
-        #         input_names=["in0"],
-        #         output_names=["out0"],
-        #         dynamic_shapes=dynamic_shapes,
-        #         dynamo=True,
-        #     )
-        #     logger.info(f"ONNX model exported with dynamo=True to {output_path}")
-        # else:
-        # Fallback for older PyTorch: use the legacy TorchScript-based exporter.
-        logger.info("Using legacy TorchScript-based ONNX exporter")
-        torch.onnx.export(
-            model,
-            dummy_input,
-            output_path,
-            export_params=True,
-            opset_version=11,
-            input_names=["in0"],
-            output_names=["out0"],
-            dynamic_axes={
-                "in0": {2: "height", 3: "width"},
-                "out0": {2: "height", 3: "width"},
-            },
-            dynamo=False,
-        )
-        logger.info(f"ONNX model exported with legacy exporter to {output_path}")
+    ts_model = torch.jit.trace(model, dummy_input)
+    output_path = os.path.join(output_dir, f"{args.model_name}.pt")
+    ts_model.save(output_path)
+    logger.info(f"Torchscript model exported to {output_path}")
 
 def dni(net_a, net_b, dni_weight, key='params', loc='cpu'):
     """Deep network interpolation.
@@ -222,4 +183,7 @@ if __name__ == "__main__":
     parser.add_argument('--convert_to_ts', action='store_true', default=False, help='Convert to torchscript model')
 
     args = parser.parse_args()
-    convert_onnx(args)
+    if args.convert_to_ts:
+        convert_ts(args)
+    else:
+        convert_onnx(args)
