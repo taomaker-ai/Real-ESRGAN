@@ -9,3 +9,5 @@ torchvision
 tqdm
 loguru
 onnxscript
+pnnx
+ncnn

@@ -138,4 +138,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-onnx_models/*
+onnx_or_ts_models/*

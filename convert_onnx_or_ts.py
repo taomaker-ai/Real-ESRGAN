@@ -8,6 +8,14 @@ from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from basicsr.utils.download_util import load_file_from_url
 from loguru import logger
 
+# Try to use the modern torch.export-based ONNX exporter when available.
+try:  # PyTorch >= 2.3
+    from torch.export import Dim
+
+    _HAS_TORCH_EXPORT = True
+except Exception:  # pragma: no cover - older PyTorch versions
+    _HAS_TORCH_EXPORT = False
+
 def load_model(args):
     args.model_name = args.model_name.split('.')[0]
     if args.model_name == 'RealESRGAN_x4plus':  # x4 RRDBNet model
@@ -45,7 +53,6 @@ def convert_onnx(args):
     os.makedirs(output_dir, exist_ok=True)
     model, model_path = load_model(args)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    output_path = os.path.join(output_dir, f"{args.model_name}.onnx")
 
     # use dni to control the denoise strength
     dni_weight = None
@@ -69,11 +76,54 @@ def convert_onnx(args):
     model.load_state_dict(loadnet[keyname], strict=True)
 
     model.eval()
-    dummy_input = torch.randn(1, 3, 64, 64).to(device)
+    dummy_input = torch.randn(1, 3, 64, 64)
     # Use a modern ONNX opset to avoid failing version conversions (e.g. Resize -> older opsets).
     # Torch recommends opset_version >= 18 for the current exporter.
-    torch.onnx.export(model, dummy_input, output_path, export_params=True, opset_version=18)
-    logger.info(f"Model exported to {output_path}")
+    if args.convert_to_ts:
+        ts_model = torch.jit.trace(model, dummy_input)
+        output_path = os.path.join(output_dir, f"{args.model_name}.pt")
+        ts_model.save(output_path)
+        logger.info(f"Torchscript model exported to {output_path}")
+    else:
+        output_path = os.path.join(output_dir, f"{args.model_name}.onnx")
+        if _HAS_TORCH_EXPORT:
+            # Use the new torch.export-based ONNX exporter (dynamo=True) with dynamic_shapes.
+            # We keep batch/channel static and allow dynamic height/width.
+            # Specify dynamic shapes as a list/tuple matching `inputs` so we don't
+            # depend on the underlying argument name (often "x" in the model).
+            # Batch and channels are static; height/width are dynamic.
+            dynamic_shapes = [
+                (1, 3, Dim("height"), Dim("width")),
+            ]
+            torch.onnx.export(
+                model,
+                dummy_input,
+                output_path,
+                export_params=True,
+                opset_version=18,
+                input_names=["input"],
+                output_names=["output"],
+                dynamic_shapes=dynamic_shapes,
+                dynamo=True,
+            )
+            logger.info(f"ONNX model exported with dynamo=True to {output_path}")
+        else:
+            # Fallback for older PyTorch: use the legacy TorchScript-based exporter.
+            torch.onnx.export(
+                model,
+                dummy_input,
+                output_path,
+                export_params=True,
+                opset_version=18,
+                input_names=["input"],
+                output_names=["output"],
+                dynamic_axes={
+                    "input": {2: "height", 3: "width"},
+                    "output": {2: "height", 3: "width"},
+                },
+                dynamo=False,
+            )
+            logger.info(f"ONNX model exported with legacy exporter to {output_path}")
 
 def dni(net_a, net_b, dni_weight, key='params', loc='cpu'):
     """Deep network interpolation.
@@ -95,9 +145,10 @@ if __name__ == "__main__":
         default='RealESRGAN_x4plus',
         help=('Model names: RealESRGAN_x4plus | RealESRNet_x4plus | RealESRGAN_x4plus_anime_6B | RealESRGAN_x2plus | '
               'realesr-animevideov3 | realesr-general-x4v3'))
-    parser.add_argument("-o", "--output_dir", type=str, default="onnx_models")
+    parser.add_argument("-o", "--output_dir", type=str, default="onnx_or_ts_models")
     parser.add_argument(
         '--model_path', type=str, default=None, help='[Option] Model path. Usually, you do not need to specify it')
+    parser.add_argument('--convert_to_ts', action='store_true', default=False, help='Convert to torchscript model')
 
     args = parser.parse_args()
     convert_onnx(args)
